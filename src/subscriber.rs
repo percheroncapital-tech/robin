@@ -225,6 +225,75 @@ where
     FleetLogLayer { service: ctx.service, tenant: ctx.tenant, writer }
 }
 
+/// Returns a callable `(msg, location, thread)` that serializes a conforming
+/// ERROR envelope and writes it via `writer`. Used by `install_panic_hook` and
+/// directly in tests.
+pub(crate) fn panic_hook_with_writer<W>(
+    ctx: ServiceCtx,
+    writer: W,
+) -> impl Fn(&str, &str, &str) + Send + Sync + 'static
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let service = ctx.service;
+    let tenant = ctx.tenant;
+    move |msg: &str, location: &str, thread: &str| {
+        let ts = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+
+        let mut fields = BTreeMap::new();
+        fields.insert("panic.location".to_string(), serde_json::Value::String(location.to_string()));
+        fields.insert("panic.thread".to_string(), serde_json::Value::String(thread.to_string()));
+
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            ts,
+            level: "ERROR".to_string(),
+            service: service.to_string(),
+            tenant: tenant.clone(),
+            target: "panic".to_string(),
+            msg: msg.to_string(),
+            request_id: None,
+            trace_id: None,
+            span: None,
+            fields,
+        };
+
+        if let Ok(mut line) = serde_json::to_string(&envelope) {
+            line.push('\n');
+            let mut w = writer.make_writer();
+            let _ = w.write_all(line.as_bytes());
+        }
+    }
+}
+
+/// Installs a process-global panic hook that emits panics as conforming ERROR
+/// envelopes before unwinding. Called from `init`.
+fn install_panic_hook(ctx: ServiceCtx) {
+    let hook = panic_hook_with_writer(ctx, std::io::stderr);
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+
+        hook(msg, &location, &thread);
+    }));
+}
+
 pub fn init(ctx: ServiceCtx) {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
@@ -232,6 +301,11 @@ pub fn init(ctx: ServiceCtx) {
     let filter = EnvFilter::try_from_env("LOG_FILTER")
         .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn"));
+
+    // Install the panic hook before the subscriber so panics always emit
+    // even if the subscriber isn't fully wired yet.
+    let hook_ctx = ServiceCtx { service: ctx.service, tenant: ctx.tenant.clone() };
+    install_panic_hook(hook_ctx);
 
     tracing_subscriber::registry()
         .with(filter)
@@ -255,6 +329,22 @@ mod tests {
     impl<'a> MakeWriter<'a> for Buf {
         type Writer = Buf;
         fn make_writer(&'a self) -> Buf { self.clone() }
+    }
+
+    #[test]
+    fn panic_hook_emits_conforming_error_envelope() {
+        let buf = Buf::default();
+        let ctx = ServiceCtx { service: "testsvc", tenant: "bbt".into() };
+        // install_panic_hook must accept an injected writer for testability
+        let hook = panic_hook_with_writer(ctx, buf.clone());
+        // simulate a panic info; helper builds the envelope line the hook would write
+        hook("boom", "src/x.rs:42", "main");
+        let line = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let line = line.lines().next().unwrap();
+        let env = crate::validate::validate(line).expect("panic line must validate");
+        assert_eq!(env.level, "ERROR");
+        assert_eq!(env.msg, "boom");
+        assert_eq!(env.fields.get("panic.location").unwrap(), "src/x.rs:42");
     }
 
     #[test]
