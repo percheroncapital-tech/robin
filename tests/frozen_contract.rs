@@ -1,7 +1,7 @@
 // Asserts the canonical envelope JSON shape never loses/renames a v1 field.
 // If this test must change to REMOVE or RENAME a field, that is a breaking
 // change and requires a major version bump + CONVENTIONS.md update — not allowed silently.
-use fleet_log::{validate, envelope::ENVELOPE_VERSION};
+use robin::{validate, envelope::ENVELOPE_VERSION};
 
 #[test]
 fn v1_required_keys_are_frozen() {

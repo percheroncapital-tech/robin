@@ -1,6 +1,6 @@
 [package]
-name = "fleet-log"
-version = "0.1.0"
+name = "robin"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
