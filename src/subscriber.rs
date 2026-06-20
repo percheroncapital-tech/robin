@@ -100,13 +100,13 @@ impl Visit for SpanFieldVisitor {
 
 // ── layer ─────────────────────────────────────────────────────────────────────
 
-pub(crate) struct FleetLogLayer<W> {
+pub(crate) struct RobinLayer<W> {
     service: &'static str,
     tenant: String,
     writer: W,
 }
 
-impl<S, W> Layer<S> for FleetLogLayer<W>
+impl<S, W> Layer<S> for RobinLayer<W>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     W: for<'a> MakeWriter<'a> + 'static,
@@ -218,11 +218,11 @@ impl Visit for StoredFields {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
-pub(crate) fn layer_with_writer<W>(ctx: ServiceCtx, writer: W) -> FleetLogLayer<W>
+pub(crate) fn layer_with_writer<W>(ctx: ServiceCtx, writer: W) -> RobinLayer<W>
 where
     W: for<'a> MakeWriter<'a> + 'static,
 {
-    FleetLogLayer { service: ctx.service, tenant: ctx.tenant, writer }
+    RobinLayer { service: ctx.service, tenant: ctx.tenant, writer }
 }
 
 /// Returns a callable `(msg, location, thread)` that serializes a conforming
